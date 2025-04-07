@@ -78,7 +78,7 @@ class CalibrationBase(tk.Frame):
         right_heel_height = right_heel_pos[1]
         avg_hip_height = (left_hip_pos[1] + right_hip_pos[1]) / 2
 
-        if self.frame_count % 10 == 0:
+        if self.frame_count % 3 == 0:
             print(f"Frame {self.frame_count}: Left Heel [X: {left_heel_pos[0]:.2f}, Y: {left_heel_pos[1]:.2f}, Z: {left_heel_pos[2]:.2f}], "
                   f"Right Heel [X: {right_heel_pos[0]:.2f}, Y: {right_heel_pos[1]:.2f}, Z: {right_heel_pos[2]:.2f}]")
 
@@ -106,11 +106,13 @@ class Calibration1Window(CalibrationBase):
         self.prev_right_heel_height = None
         self.last_crossing_time_left = None
         self.last_crossing_time_right = None
+        self.calibration_complete = False  # 캘리브레이션 완료 여부 플래그 추가
         self.update_video_feed()
 
     def update_video_feed(self):
         if self.frame_count >= self.max_frames:
             self.finish_calibration()
+            self.calibration_complete = True  # 캘리브레이션 완료 표시
             return
         if not self.camera_thread.image_ready:
             self.root.after(10, self.update_video_feed)
@@ -151,8 +153,8 @@ class Calibration1Window(CalibrationBase):
                 print(f"Frame 240: Left Threshold: {self.left_crossing_threshold:.2f}, Right Threshold: {self.right_crossing_threshold:.2f}")
                 print(f"Debug: avg_left={avg_left:.2f}, std_left={std_left:.2f}, avg_right={avg_right:.2f}, std_right={std_right:.2f}")
 
-            # Frame 240~480: 교차 주기 감지 및 로그 출력
-            if self.frame_count > 240 and self.left_crossing_threshold is not None and self.right_crossing_threshold is not None:
+            # Frame 240~480: 교차 주기 감지 및 로그 출력 (캘리브레이션 중에만)
+            if not self.calibration_complete and self.frame_count > 240 and self.left_crossing_threshold is not None and self.right_crossing_threshold is not None:
                 left_cross = (self.prev_left_heel_height < self.left_crossing_threshold <= left_heel_height or 
                               self.prev_left_heel_height >= self.left_crossing_threshold > left_heel_height)
                 right_cross = (self.prev_right_heel_height < self.right_crossing_threshold <= right_heel_height or 
@@ -188,24 +190,24 @@ class Calibration1Window(CalibrationBase):
         if len(self.left_heel_heights) < 240 or len(self.crossings_left) < 1 or len(self.crossings_right) < 1:
             self.left_crossing_threshold = -0.44
             self.right_crossing_threshold = -0.42
-            self.accel_factor = 1.0
+            self.accel_factor = 1.0  # 기존 기본값
             self.base_noise_score = 0.38
             self.left_height_movement = 0.10
             self.right_height_movement = 0.12
             print("데이터 부족, 기본값 적용")
         else:
-            # 교차 주기 계산
+            # 교차 주기 계산 (독립적으로)
             intervals_left = [interval for _, interval in self.crossings_left]
             intervals_right = [interval for _, interval in self.crossings_right]
             trimmed_left = np.percentile(intervals_left, [10, 90])
             trimmed_right = np.percentile(intervals_right, [10, 90])
             avg_crossing_left = np.mean([i for i in intervals_left if trimmed_left[0] <= i <= trimmed_left[1]])
             avg_crossing_right = np.mean([i for i in intervals_right if trimmed_right[0] <= i <= trimmed_right[1]])
-            stride_freq_left = 1 / avg_crossing_left if avg_crossing_left > 0 else 1.2
-            stride_freq_right = 1 / avg_crossing_right if avg_crossing_right > 0 else 1.3
-            self.calib_frequency = (stride_freq_left + stride_freq_right) / 2
+            self.left_calib_frequency = 1 / avg_crossing_left if avg_crossing_left > 0 else 1.2
+            self.right_calib_frequency = 1 / avg_crossing_right if avg_crossing_right > 0 else 1.3
+            # self.calib_frequency는 제거 (독립 주기 사용)
 
-            # 높이 이동값 계산 (기존 np.diff 방식 유지)
+            # 높이 이동값 계산
             left_y = np.array(list(self.left_heel_heights)[-240:])
             right_y = np.array(list(self.right_heel_heights)[-240:])
             self.left_height_movement = np.mean(np.abs(np.diff(left_y)))
@@ -213,39 +215,46 @@ class Calibration1Window(CalibrationBase):
             print(f"Debug: left_y range={np.max(left_y):.2f} - {np.min(left_y):.2f}, height_movement={self.left_height_movement:.4f}")
             print(f"Debug: right_y range={np.max(right_y):.2f} - {np.min(right_y):.2f}, height_movement={self.right_height_movement:.4f}")
 
-            # 가속도 계수 및 1.399 매핑
+            # 가속도 계수 계산 (독립적으로)
             target_speed = 1.399  # 목표 속도
-            avg_height_movement = max(self.left_height_movement, self.right_height_movement)
-            self.accel_factor = min(target_speed / (avg_height_movement * self.calib_frequency) if avg_height_movement * self.calib_frequency > 0 else 1.0, 100.0)
+            left_calib_speed = self.left_height_movement * self.left_calib_frequency
+            right_calib_speed = self.right_height_movement * self.right_calib_frequency
+            self.accel_factor_left = target_speed / left_calib_speed if left_calib_speed > 0 else 1.0
+            self.accel_factor_right = target_speed / right_calib_speed if right_calib_speed > 0 else 1.0
 
-            # 노이즈 스코어 계산
+            # 노이즈 스코어 계산 (기존 유지)
             left_x = np.array([pos[0] for pos in self.left_heel_40frame])
             left_y = np.array([pos[1] for pos in self.left_heel_40frame])
             left_z = np.array([pos[2] for pos in self.left_heel_40frame])
             right_x = np.array([pos[0] for pos in self.right_heel_40frame])
             right_y = np.array([pos[1] for pos in self.right_heel_40frame])
             right_z = np.array([pos[2] for pos in self.right_heel_40frame])
+
             delta_x_left = np.max(left_x) - np.min(left_x)
             delta_y_left = np.max(left_y) - np.min(left_y)
             delta_z_left = np.max(left_z) - np.min(left_z)
             delta_x_right = np.max(right_x) - np.min(right_x)
             delta_y_right = np.max(right_y) - np.min(right_y)
             delta_z_right = np.max(right_z) - np.min(right_z)
-            score_left = 1 * delta_x_left + 3 * delta_y_left + 1 * delta_z_left
-            score_right = 1 * delta_x_right + 3 * delta_y_right + 1 * delta_z_right
-            self.base_noise_score = (score_left + score_right) / 2
+
+            score_left = 1 * delta_x_left + 1 * delta_y_left + 1 * delta_z_left
+            score_right = 1 * delta_x_right + 1 * delta_y_right + 1 * delta_z_right
+            self.base_noise_score = (score_left + score_right) / 2  # 평균 유지
 
             # 결과 출력
             print(f"Calibration Done: Left Threshold: {self.left_crossing_threshold:.2f}, Right Threshold: {self.right_crossing_threshold:.2f}, "
-                  f"Accel Factor: {self.accel_factor:.2f}, Base Noise Score: {self.base_noise_score:.2f}, "
+                  f"Accel Factor Left: {self.accel_factor_left:.2f}, Accel Factor Right: {self.accel_factor_right:.2f}, "
+                  f"Base Noise Score: {self.base_noise_score:.2f}, "
                   f"Left Height Movement: {self.left_height_movement:.2f}, Right Height Movement: {self.right_height_movement:.2f}")
-            print(f"Calibrated Stride Frequency: {self.calib_frequency:.2f} Hz")
-            print(f"1.399 Mapping: target_speed = accel_factor ({self.accel_factor:.2f}) * max(height_movement) ({avg_height_movement:.4f}) * calib_frequency ({self.calib_frequency:.2f}) ≈ 1.399")
+            print(f"Left Calibrated Stride Frequency: {self.left_calib_frequency:.2f} Hz, Right Calibrated Stride Frequency: {self.right_calib_frequency:.2f} Hz")
+            print(f"1.399 Mapping: Left = accel_factor_left ({self.accel_factor_left:.2f}) * left_height_movement ({self.left_height_movement:.4f}) * left_calib_frequency ({self.left_calib_frequency:.2f}) ≈ 1.399")
+            print(f"1.399 Mapping: Right = accel_factor_right ({self.accel_factor_right:.2f}) * right_height_movement ({self.right_height_movement:.4f}) * right_calib_frequency ({self.right_calib_frequency:.2f}) ≈ 1.399")
 
         self.root.destroy()
 
     def get_results(self):
-        return (self.left_crossing_threshold, self.right_crossing_threshold, self.accel_factor, self.base_noise_score, self.calib_frequency)
+        # 수정: accel_factor 대신 left/right 독립 값 반환
+        return (self.left_crossing_threshold, self.right_crossing_threshold, self.accel_factor_left, self.accel_factor_right, self.base_noise_score, self.left_calib_frequency, self.right_calib_frequency)
     def display_image(self, img):
         imgtk = ImageTk.PhotoImage(image=Image.fromarray(img))
         self.canvas.itemconfig(self.canvas_video, image=imgtk)
@@ -354,17 +363,17 @@ def run_calibration_and_tracking(root, params, camera_thread, backend, pose, mp_
     calib1_window = Calibration1Window(calib1_root, params, camera_thread, pose, mp_drawing)
     calib1_root.mainloop()
     
-    # 수정: 5개 값 받기
-    left_crossing_threshold, right_crossing_threshold, accel_factor, base_noise_score, calib_frequency = calib1_window.get_results()
-    if left_crossing_threshold is None or right_crossing_threshold is None or accel_factor is None:
+    # 7개 값 받기
+    left_crossing_threshold, right_crossing_threshold, accel_factor_left, accel_factor_right, base_noise_score, left_calib_frequency, right_calib_frequency = calib1_window.get_results()
+    if left_crossing_threshold is None or right_crossing_threshold is None or accel_factor_left is None or accel_factor_right is None:
         print("1차 캘리브레이션 실패")
         return None
     print(f"Calibration Done: Left Threshold: {left_crossing_threshold:.2f}, Right Threshold: {right_crossing_threshold:.2f}, "
-          f"Accel Factor: {accel_factor:.2f}, Calib Frequency: {calib_frequency:.2f}")
+          f"Accel Factor Left: {accel_factor_left:.2f}, Accel Factor Right: {accel_factor_right:.2f}, "
+          f"Left Calib Frequency: {left_calib_frequency:.2f}, Right Calib Frequency: {right_calib_frequency:.2f}")
 
     eawip_technique = EAWIPTechnique()
-    # 수정: calib_frequency 전달
-    eawip_technique.set_calibration_results(left_crossing_threshold, right_crossing_threshold, accel_factor, base_noise_score, calib_frequency)
+    eawip_technique.set_calibration_results(left_crossing_threshold, right_crossing_threshold, accel_factor_left, accel_factor_right, base_noise_score, left_calib_frequency, right_calib_frequency)
     print("캘리브레이션 적용 완료")
 
     inference_root = tk.Tk()

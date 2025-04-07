@@ -32,7 +32,10 @@ class EAWIPTechnique:
         
         self.left_crossing_threshold = 0.0
         self.right_crossing_threshold = 0.0
-        self.accel_factor = 1.0
+        self.accel_factor_left = 1.0  # 왼발 가속도 계수
+        self.accel_factor_right = 1.0  # 오른발 가속도 계수
+        self.left_calib_frequency = 1.2  # 왼발 기준 주기
+        self.right_calib_frequency = 1.3  # 오른발 기준 주기
         self.base_noise_score = 0.38  # 캘리브레이션 기본값
         
         self.prev_left_heel_height = None
@@ -50,14 +53,18 @@ class EAWIPTechnique:
         self.last_motion_time = time.time()
         self.motion_timeout = 2.0
 
-    def set_calibration_results(self, left_crossing_threshold, right_crossing_threshold, accel_factor, base_noise_score, calib_frequency):
+    def set_calibration_results(self, left_crossing_threshold, right_crossing_threshold, accel_factor_left, accel_factor_right, base_noise_score, left_calib_frequency, right_calib_frequency):
         self.left_crossing_threshold = left_crossing_threshold
         self.right_crossing_threshold = right_crossing_threshold
-        self.accel_factor = accel_factor
+        self.accel_factor_left = accel_factor_left
+        self.accel_factor_right = accel_factor_right
         self.base_noise_score = base_noise_score
-        self.calib_frequency = calib_frequency
+        self.left_calib_frequency = left_calib_frequency
+        self.right_calib_frequency = right_calib_frequency
         print(f"Calibration Applied - Left Threshold: {self.left_crossing_threshold:.2f}, Right Threshold: {self.right_crossing_threshold:.2f}, "
-              f"Accel Factor: {self.accel_factor:.2f}, Base Noise Score: {self.base_noise_score:.2f}, Calib Frequency: {self.calib_frequency:.2f}")
+            f"Accel Factor Left: {self.accel_factor_left:.2f}, Accel Factor Right: {self.accel_factor_right:.2f}, "
+            f"Base Noise Score: {self.base_noise_score:.2f}, "
+            f"Left Calib Frequency: {self.left_calib_frequency:.2f}, Right Calib Frequency: {self.right_calib_frequency:.2f}")
     def detect_frontal_speed(self):
         if len(self.left_heel_heights) < 30 or len(self.right_heel_heights) < 30:
             return 0.0, 0.0
@@ -70,26 +77,34 @@ class EAWIPTechnique:
                 self.crossings_right.clear()
                 return 0.0, 0.0
 
-        # 수정: np.diff 대신 max - min 사용
+        # 높이 이동 계산
         recent_left_heights = np.array(list(self.left_heel_heights)[-30:])
         recent_right_heights = np.array(list(self.right_heel_heights)[-30:])
         height_movement_left = np.max(recent_left_heights) - np.min(recent_left_heights)
         height_movement_right = np.max(recent_right_heights) - np.min(recent_right_heights)
 
+        # 교차 주기 계산
         crossings_left = [t for t in self.crossings_left if t > 0]
         crossings_right = [t for t in self.crossings_right if t > 0]
         avg_cross_left = np.mean(crossings_left) if crossings_left else 1.0
         avg_cross_right = np.mean(crossings_right) if crossings_right else 1.0
         
-        stride_frequency = max(1.0 / avg_cross_left if avg_cross_left > 0 else 0, 1.0 / avg_cross_right if avg_cross_right > 0 else 0)
-        crossing_factor_left = min(stride_frequency / self.calib_frequency, 1.5) if self.calib_frequency > 0 else 1.0
-        crossing_factor_right = min(stride_frequency / self.calib_frequency, 1.5) if self.calib_frequency > 0 else 1.0
+        left_stride_frequency = 1.0 / avg_cross_left if avg_cross_left > 0 else 0
+        right_stride_frequency = 1.0 / avg_cross_right if avg_cross_right > 0 else 0
+        left_crossing_factor = min(left_stride_frequency / self.left_calib_frequency, 1.5) if self.left_calib_frequency > 0 else 1.0
+        right_crossing_factor = min(right_stride_frequency / self.right_calib_frequency, 1.5) if self.right_calib_frequency > 0 else 1.0
 
-        speed_left = self.accel_factor * height_movement_left * crossing_factor_left
-        speed_right = self.accel_factor * height_movement_right * crossing_factor_right
-        target_speed = max(speed_left, speed_right)
+        # 속도 계산
+        speed_left = self.accel_factor_left * height_movement_left * left_crossing_factor
+        speed_right = self.accel_factor_right * height_movement_right * right_crossing_factor
+        target_speed = (speed_left + speed_right) / 2  # 평균으로 조정
 
-        return target_speed, stride_frequency
+        # 디버깅 출력 추가
+        if self.frame_count % 10 == 0:
+            print(f"Debug: Left Speed: {speed_left:.2f}, Right Speed: {speed_right:.2f}, "
+                  f"Left Crossing Factor: {left_crossing_factor:.2f}, Right Crossing Factor: {right_crossing_factor:.2f}")
+
+        return target_speed, max(left_stride_frequency, right_stride_frequency)  # stride_frequency는 기존처럼 max 유지
     def calculate_vibration(self):
         return 0.0
 
@@ -100,6 +115,7 @@ class EAWIPTechnique:
         if len(self.left_heel_40frame) < 40 or len(self.right_heel_40frame) < 40:
             return False
 
+        # 각 발의 X, Y, Z 좌표 배열
         left_x = np.array([pos[0] for pos in self.left_heel_40frame])
         left_y = np.array([pos[1] for pos in self.left_heel_40frame])
         left_z = np.array([pos[2] for pos in self.left_heel_40frame])
@@ -107,6 +123,7 @@ class EAWIPTechnique:
         right_y = np.array([pos[1] for pos in self.right_heel_40frame])
         right_z = np.array([pos[2] for pos in self.right_heel_40frame])
 
+        # 각 축별 변동폭 계산
         delta_x_left = np.max(left_x) - np.min(left_x)
         delta_y_left = np.max(left_y) - np.min(left_y)
         delta_z_left = np.max(left_z) - np.min(left_z)
@@ -114,13 +131,26 @@ class EAWIPTechnique:
         delta_y_right = np.max(right_y) - np.min(right_y)
         delta_z_right = np.max(right_z) - np.min(right_z)
 
-        score_left = 1 * delta_x_left + 3 * delta_y_left + 1 * delta_z_left
-        score_right = 1 * delta_x_right + 3 * delta_y_right + 1 * delta_z_right
-        noise_threshold = self.base_noise_score * 3.0
+        # 가중치 동일하게 설정 (1 * X + 1 * Y + 1 * Z)
+        score_left = 1 * delta_x_left + 1 * delta_y_left + 1 * delta_z_left
+        score_right = 1 * delta_x_right + 1 * delta_y_right + 1 * delta_z_right
+        noise_threshold = self.base_noise_score * 3.0  # 기존 임계값 유지
 
-        is_noise = score_left > noise_threshold or score_right > noise_threshold
+        # 최근 10프레임 변동 체크 (움직임이 멈췄는지 확인)
+        recent_left_y = left_y[-10:]
+        recent_right_y = right_y[-10:]
+        recent_delta_y_left = np.max(recent_left_y) - np.min(recent_left_y)
+        recent_delta_y_right = np.max(recent_right_y) - np.min(recent_right_y)
+        movement_threshold = 0.02  # 최근 10프레임에서 2cm 미만 변동이면 정지로 판단
+
+        # 두 발이 동시에 변동 + 최근에 움직임이 있는 경우만 노이즈로 판단
+        is_noise = (score_left > noise_threshold and score_right > noise_threshold and 
+                    (recent_delta_y_left > movement_threshold or recent_delta_y_right > movement_threshold))
+        
         if is_noise:
-            print(f"Debug: Left Score: {score_left:.2f}, Right Score: {score_right:.2f}, Threshold: {noise_threshold:.2f}")
+            print(f"Debug: Left Score: {score_left:.2f}, Right Score: {score_right:.2f}, Threshold: {noise_threshold:.2f}, "
+                f"Recent Delta Y Left: {recent_delta_y_left:.2f}, Right: {recent_delta_y_right:.2f}")
+        
         return is_noise
 
     def process_heel_data(self, pose3d, left_heel_visible, right_heel_visible, left_visibility=0.0, right_visibility=0.0, 
