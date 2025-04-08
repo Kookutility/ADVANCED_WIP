@@ -46,7 +46,6 @@ class EAWIPTechnique:
         self.weber_fraction = 0.1
         self.last_applied_speed = 0.0
         
-        # 수정된 부분: maxlen=10 -> maxlen=30
         self.left_heel_buffer = deque(maxlen=30)
         self.right_heel_buffer = deque(maxlen=30)
         
@@ -65,6 +64,7 @@ class EAWIPTechnique:
             f"Accel Factor Left: {self.accel_factor_left:.2f}, Accel Factor Right: {self.accel_factor_right:.2f}, "
             f"Base Noise Score: {self.base_noise_score:.2f}, "
             f"Left Calib Frequency: {self.left_calib_frequency:.2f}, Right Calib Frequency: {self.right_calib_frequency:.2f}")
+
     def detect_frontal_speed(self):
         if len(self.left_heel_heights) < 30 or len(self.right_heel_heights) < 30:
             return 0.0, 0.0
@@ -77,13 +77,17 @@ class EAWIPTechnique:
                 self.crossings_right.clear()
                 return 0.0, 0.0
 
-        # 높이 이동 계산
+        # 높이 이동 계산 (수정: 평활화 적용)
         recent_left_heights = np.array(list(self.left_heel_heights)[-30:])
         recent_right_heights = np.array(list(self.right_heel_heights)[-30:])
-        height_movement_left = np.max(recent_left_heights) - np.min(recent_left_heights)
-        height_movement_right = np.max(recent_right_heights) - np.min(recent_right_heights)
+        # 기존: 최대값 - 최소값
+        # height_movement_left = np.max(recent_left_heights) - np.min(recent_left_heights)
+        # height_movement_right = np.max(recent_right_heights) - np.min(recent_right_heights)
+        # 수정: 표준편차 * 2로 변동폭 추정 (평활화)
+        height_movement_left = np.std(recent_left_heights) * 2
+        height_movement_right = np.std(recent_right_heights) * 2
 
-        # 교차 주기 계산
+        # 교차 주기 계산 (기존 유지)
         crossings_left = [t for t in self.crossings_left if t > 0]
         crossings_right = [t for t in self.crossings_right if t > 0]
         avg_cross_left = np.mean(crossings_left) if crossings_left else 1.0
@@ -102,9 +106,11 @@ class EAWIPTechnique:
         # 디버깅 출력 추가
         if self.frame_count % 10 == 0:
             print(f"Debug: Left Speed: {speed_left:.2f}, Right Speed: {speed_right:.2f}, "
-                  f"Left Crossing Factor: {left_crossing_factor:.2f}, Right Crossing Factor: {right_crossing_factor:.2f}")
+                  f"Left Crossing Factor: {left_crossing_factor:.2f}, Right Crossing Factor: {right_crossing_factor:.2f}, "
+                  f"Height Movement Left: {height_movement_left:.4f}, Height Movement Right: {height_movement_right:.4f}")
 
         return target_speed, max(left_stride_frequency, right_stride_frequency)  # stride_frequency는 기존처럼 max 유지
+
     def calculate_vibration(self):
         return 0.0
 
@@ -115,7 +121,6 @@ class EAWIPTechnique:
         if len(self.left_heel_40frame) < 40 or len(self.right_heel_40frame) < 40:
             return False
 
-        # 각 발의 X, Y, Z 좌표 배열
         left_x = np.array([pos[0] for pos in self.left_heel_40frame])
         left_y = np.array([pos[1] for pos in self.left_heel_40frame])
         left_z = np.array([pos[2] for pos in self.left_heel_40frame])
@@ -123,7 +128,6 @@ class EAWIPTechnique:
         right_y = np.array([pos[1] for pos in self.right_heel_40frame])
         right_z = np.array([pos[2] for pos in self.right_heel_40frame])
 
-        # 각 축별 변동폭 계산
         delta_x_left = np.max(left_x) - np.min(left_x)
         delta_y_left = np.max(left_y) - np.min(left_y)
         delta_z_left = np.max(left_z) - np.min(left_z)
@@ -131,19 +135,16 @@ class EAWIPTechnique:
         delta_y_right = np.max(right_y) - np.min(right_y)
         delta_z_right = np.max(right_z) - np.min(right_z)
 
-        # 가중치 동일하게 설정 (1 * X + 1 * Y + 1 * Z)
         score_left = 1 * delta_x_left + 1 * delta_y_left + 1 * delta_z_left
         score_right = 1 * delta_x_right + 1 * delta_y_right + 1 * delta_z_right
-        noise_threshold = self.base_noise_score * 3.0  # 기존 임계값 유지
+        noise_threshold = self.base_noise_score * 3.0
 
-        # 최근 10프레임 변동 체크 (움직임이 멈췄는지 확인)
         recent_left_y = left_y[-10:]
         recent_right_y = right_y[-10:]
         recent_delta_y_left = np.max(recent_left_y) - np.min(recent_left_y)
         recent_delta_y_right = np.max(recent_right_y) - np.min(recent_right_y)
-        movement_threshold = 0.02  # 최근 10프레임에서 2cm 미만 변동이면 정지로 판단
+        movement_threshold = 0.02
 
-        # 두 발이 동시에 변동 + 최근에 움직임이 있는 경우만 노이즈로 판단
         is_noise = (score_left > noise_threshold and score_right > noise_threshold and 
                     (recent_delta_y_left > movement_threshold or recent_delta_y_right > movement_threshold))
         

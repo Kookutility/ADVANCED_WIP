@@ -205,7 +205,6 @@ class Calibration1Window(CalibrationBase):
             avg_crossing_right = np.mean([i for i in intervals_right if trimmed_right[0] <= i <= trimmed_right[1]])
             self.left_calib_frequency = 1 / avg_crossing_left if avg_crossing_left > 0 else 1.2
             self.right_calib_frequency = 1 / avg_crossing_right if avg_crossing_right > 0 else 1.3
-            # self.calib_frequency는 제거 (독립 주기 사용)
 
             # 높이 이동값 계산
             left_y = np.array(list(self.left_heel_heights)[-240:])
@@ -239,7 +238,7 @@ class Calibration1Window(CalibrationBase):
 
             score_left = 1 * delta_x_left + 1 * delta_y_left + 1 * delta_z_left
             score_right = 1 * delta_x_right + 1 * delta_y_right + 1 * delta_z_right
-            self.base_noise_score = (score_left + score_right) / 2  # 평균 유지
+            self.base_noise_score = (score_left + score_right) / 2
 
             # 결과 출력
             print(f"Calibration Done: Left Threshold: {self.left_crossing_threshold:.2f}, Right Threshold: {self.right_crossing_threshold:.2f}, "
@@ -253,8 +252,8 @@ class Calibration1Window(CalibrationBase):
         self.root.destroy()
 
     def get_results(self):
-        # 수정: accel_factor 대신 left/right 독립 값 반환
         return (self.left_crossing_threshold, self.right_crossing_threshold, self.accel_factor_left, self.accel_factor_right, self.base_noise_score, self.left_calib_frequency, self.right_calib_frequency)
+
     def display_image(self, img):
         imgtk = ImageTk.PhotoImage(image=Image.fromarray(img))
         self.canvas.itemconfig(self.canvas_video, image=imgtk)
@@ -363,7 +362,6 @@ def run_calibration_and_tracking(root, params, camera_thread, backend, pose, mp_
     calib1_window = Calibration1Window(calib1_root, params, camera_thread, pose, mp_drawing)
     calib1_root.mainloop()
     
-    # 7개 값 받기
     left_crossing_threshold, right_crossing_threshold, accel_factor_left, accel_factor_right, base_noise_score, left_calib_frequency, right_calib_frequency = calib1_window.get_results()
     if left_crossing_threshold is None or right_crossing_threshold is None or accel_factor_left is None or accel_factor_right is None:
         print("1차 캘리브레이션 실패")
