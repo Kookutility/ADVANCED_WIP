@@ -21,7 +21,7 @@ OUTPUT_PATH = Path(__file__).parent
 ASSETS_PATH = OUTPUT_PATH / Path("assets/frame4")
 
 class CalibrationBase(tk.Frame):
-    specific_landmark_indices = [2, 3, 1, 4, 20, 17]  # 발뒤꿈치: 20 (LEFT_HEEL), 17 (RIGHT_HEEL)
+    specific_landmark_indices = [2, 3, 1, 4, 20, 17]
 
     def __init__(self, root, params, camera_thread, pose, mp_drawing, max_frames, *args, **kwargs):
         tk.Frame.__init__(self, root, *args, **kwargs)
@@ -34,8 +34,8 @@ class CalibrationBase(tk.Frame):
         self.frame_count = 0
         self.left_heel_heights = deque(maxlen=max_frames)
         self.right_heel_heights = deque(maxlen=max_frames)
-        self.left_heel_positions = deque(maxlen=90)  # [X, Y, Z]
-        self.right_heel_positions = deque(maxlen=90)  # [X, Y, Z]
+        self.left_heel_positions = deque(maxlen=90)
+        self.right_heel_positions = deque(maxlen=90)
         self.hip_heights = deque(maxlen=90)
         self.landmark_positions = [deque(maxlen=30) for _ in self.specific_landmark_indices]
         self.root.wm_iconbitmap(icon_path)
@@ -66,10 +66,10 @@ class CalibrationBase(tk.Frame):
         return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
     def process_pose(self, pose3d):
-        left_heel_pos = pose3d[0]  # LEFT_ANKLE
-        right_heel_pos = pose3d[5]  # RIGHT_ANKLE
-        left_hip_pos = pose3d[2]    # LEFT_HIP
-        right_hip_pos = pose3d[3]   # RIGHT_HIP
+        left_heel_pos = pose3d[0]
+        right_heel_pos = pose3d[5]
+        left_hip_pos = pose3d[2]
+        right_hip_pos = pose3d[3]
 
         self.left_heel_positions.append(left_heel_pos)
         self.right_heel_positions.append(right_heel_pos)
@@ -92,27 +92,32 @@ class Calibration1Window(CalibrationBase):
         super().__init__(root, params, camera_thread, pose, mp_drawing, max_frames=480, *args, **kwargs)
         self.root.title("1차 캘리브레이션")
         self.time_stamps = deque(maxlen=480)
-        self.crossings_left = []  # (시간, 인터벌)
-        self.crossings_right = []
+        self.crossings_left = deque(maxlen=10)  # (시간, 프레임 번호)
+        self.crossings_right = deque(maxlen=10)  # (시간, 프레임 번호)
         self.left_crossing_threshold = None
         self.right_crossing_threshold = None
-        self.accel_factor = 1.0
-        self.base_noise_score = 0.38  # 기본값
+        self.accel_factor_left = 1.0
+        self.accel_factor_right = 1.0
+        self.base_noise_score = 0.38
         self.left_height_movement = 0.0
         self.right_height_movement = 0.0
-        self.left_heel_40frame = deque(maxlen=40)  # 노이즈 기준용
+        self.left_heel_40frame = deque(maxlen=40)
         self.right_heel_40frame = deque(maxlen=40)
         self.prev_left_heel_height = None
         self.prev_right_heel_height = None
         self.last_crossing_time_left = None
         self.last_crossing_time_right = None
-        self.calibration_complete = False  # 캘리브레이션 완료 여부 플래그 추가
+        self.last_crossing_frame_left = None
+        self.last_crossing_frame_right = None
+        self.calibration_complete = False
+        self.left_calib_frequency = 1.2
+        self.right_calib_frequency = 1.3
         self.update_video_feed()
 
     def update_video_feed(self):
         if self.frame_count >= self.max_frames:
             self.finish_calibration()
-            self.calibration_complete = True  # 캘리브레이션 완료 표시
+            self.calibration_complete = True
             return
         if not self.camera_thread.image_ready:
             self.root.after(10, self.update_video_feed)
@@ -133,50 +138,68 @@ class Calibration1Window(CalibrationBase):
             left_heel_height, right_heel_height, avg_hip_height = self.process_pose(pose3d)
             self.left_heel_heights.append(left_heel_height)
             self.right_heel_heights.append(right_heel_height)
-            self.left_heel_positions.append(pose3d[0])
-            self.right_heel_positions.append(pose3d[5])
             self.left_heel_40frame.append(pose3d[0])
             self.right_heel_40frame.append(pose3d[5])
             current_time = time.time()
             self.time_stamps.append(current_time)
 
-            # Frame 90~240: 임계값 계산
-            if self.frame_count == 240:
+            # Frame 90 이후: 동적 임계값 계산 및 교차 감지
+            if not self.calibration_complete and self.frame_count > 90:
                 left_y = np.array(list(self.left_heel_heights))
                 right_y = np.array(list(self.right_heel_heights))
-                avg_left = np.mean(left_y)
-                avg_right = np.mean(right_y)
-                std_left = np.std(left_y)
-                std_right = np.std(right_y)
-                self.left_crossing_threshold = avg_left + std_left
-                self.right_crossing_threshold = avg_right + std_right
-                print(f"Frame 240: Left Threshold: {self.left_crossing_threshold:.2f}, Right Threshold: {self.right_crossing_threshold:.2f}")
-                print(f"Debug: avg_left={avg_left:.2f}, std_left={std_left:.2f}, avg_right={avg_right:.2f}, std_right={std_right:.2f}")
+                self.left_crossing_threshold = np.mean(left_y) if len(left_y) > 0 else 0.0
+                self.right_crossing_threshold = np.mean(right_y) if len(right_y) > 0 else 0.0
 
-            # Frame 240~480: 교차 주기 감지 및 로그 출력 (캘리브레이션 중에만)
-            if not self.calibration_complete and self.frame_count > 240 and self.left_crossing_threshold is not None and self.right_crossing_threshold is not None:
-                left_cross = (self.prev_left_heel_height < self.left_crossing_threshold <= left_heel_height or 
-                              self.prev_left_heel_height >= self.left_crossing_threshold > left_heel_height)
-                right_cross = (self.prev_right_heel_height < self.right_crossing_threshold <= right_heel_height or 
-                               self.prev_right_heel_height >= self.right_crossing_threshold > right_heel_height)
+                if self.frame_count % 30 == 0:
+                    print(f"Frame {self.frame_count}: Left Threshold: {self.left_crossing_threshold:.2f}, Right Threshold: {self.right_crossing_threshold:.2f}")
+                    print(f"Debug: avg_left={np.mean(left_y):.2f}, std_left={np.std(left_y):.2f}, avg_right={np.mean(right_y):.2f}, std_right={np.std(right_y):.2f}")
+
+                left_cross = (self.prev_left_heel_height < self.left_crossing_threshold <= left_heel_height) if self.prev_left_heel_height is not None else False
+                right_cross = (self.prev_right_heel_height < self.right_crossing_threshold <= right_heel_height) if self.prev_right_heel_height is not None else False
                 
-                if left_cross and self.last_crossing_time_left is not None:
-                    interval = current_time - self.last_crossing_time_left
-                    self.crossings_left.append((current_time, interval))
-                    self.last_crossing_time_left = current_time
-                    stride_freq_left = 1 / interval if interval > 0 else 0
-                    print(f"Frame {self.frame_count}: Left Crossing Detected, Interval: {interval:.3f}s, Stride Frequency: {stride_freq_left:.2f} Hz")
-                elif left_cross:
-                    self.last_crossing_time_left = current_time
+                if left_cross:
+                    if self.last_crossing_time_left is not None:
+                        interval = current_time - self.last_crossing_time_left
+                        frame_interval = self.frame_count - self.last_crossing_frame_left
+                        if frame_interval >= 10:  # 최소 10프레임 간격
+                            self.crossings_left.append((current_time, self.frame_count))
+                            # 실시간 Height Movement 계산
+                            start_idx = max(0, len(self.left_heel_heights) - (self.frame_count - self.last_crossing_frame_left))
+                            end_idx = len(self.left_heel_heights) - 1
+                            between = list(self.left_heel_heights)[start_idx:end_idx + 1]
+                            if between:
+                                self.left_height_movement = max(between) - min(between)
+                            self.last_crossing_time_left = current_time
+                            self.last_crossing_frame_left = self.frame_count
+                            stride_freq_left = min(1.0 / interval if interval > 0 else 0, 5.0)
+                            print(f"Frame {self.frame_count}: Left Crossing Detected (Upward), Interval: {interval:.3f}s, Stride Frequency: {stride_freq_left:.2f} Hz")
+                    else:
+                        self.last_crossing_time_left = current_time
+                        self.last_crossing_frame_left = self.frame_count
+                        self.crossings_left.append((current_time, self.frame_count))
+                        print(f"Frame {self.frame_count}: Left Crossing Detected (Upward, First)")
 
-                if right_cross and self.last_crossing_time_right is not None:
-                    interval = current_time - self.last_crossing_time_right
-                    self.crossings_right.append((current_time, interval))
-                    self.last_crossing_time_right = current_time
-                    stride_freq_right = 1 / interval if interval > 0 else 0
-                    print(f"Frame {self.frame_count}: Right Crossing Detected, Interval: {interval:.3f}s, Stride Frequency: {stride_freq_right:.2f} Hz")
-                elif right_cross:
-                    self.last_crossing_time_right = current_time
+                if right_cross:
+                    if self.last_crossing_time_right is not None:
+                        interval = current_time - self.last_crossing_time_right
+                        frame_interval = self.frame_count - self.last_crossing_frame_right
+                        if frame_interval >= 10:  # 최소 10프레임 간격
+                            self.crossings_right.append((current_time, self.frame_count))
+                            # 실시간 Height Movement 계산
+                            start_idx = max(0, len(self.right_heel_heights) - (self.frame_count - self.last_crossing_frame_right))
+                            end_idx = len(self.right_heel_heights) - 1
+                            between = list(self.right_heel_heights)[start_idx:end_idx + 1]
+                            if between:
+                                self.right_height_movement = max(between) - min(between)
+                            self.last_crossing_time_right = current_time
+                            self.last_crossing_frame_right = self.frame_count
+                            stride_freq_right = min(1.0 / interval if interval > 0 else 0, 5.0)
+                            print(f"Frame {self.frame_count}: Right Crossing Detected (Upward), Interval: {interval:.3f}s, Stride Frequency: {stride_freq_right:.2f} Hz")
+                    else:
+                        self.last_crossing_time_right = current_time
+                        self.last_crossing_frame_right = self.frame_count
+                        self.crossings_right.append((current_time, self.frame_count))
+                        print(f"Frame {self.frame_count}: Right Crossing Detected (Upward, First)")
 
             self.prev_left_heel_height = left_heel_height
             self.prev_right_heel_height = right_heel_height
@@ -187,41 +210,31 @@ class Calibration1Window(CalibrationBase):
         self.root.after(10, self.update_video_feed)
 
     def finish_calibration(self):
-        if len(self.left_heel_heights) < 240 or len(self.crossings_left) < 1 or len(self.crossings_right) < 1:
+        if len(self.left_heel_heights) < 90 or len(self.crossings_left) < 2 or len(self.crossings_right) < 2:
             self.left_crossing_threshold = -0.44
             self.right_crossing_threshold = -0.42
-            self.accel_factor = 1.0  # 기존 기본값
             self.base_noise_score = 0.38
             self.left_height_movement = 0.10
             self.right_height_movement = 0.12
+            self.left_calib_frequency = 1.2
+            self.right_calib_frequency = 1.3
             print("데이터 부족, 기본값 적용")
         else:
-            # 교차 주기 계산 (독립적으로)
-            intervals_left = [interval for _, interval in self.crossings_left]
-            intervals_right = [interval for _, interval in self.crossings_right]
-            trimmed_left = np.percentile(intervals_left, [10, 90])
-            trimmed_right = np.percentile(intervals_right, [10, 90])
-            avg_crossing_left = np.mean([i for i in intervals_left if trimmed_left[0] <= i <= trimmed_left[1]])
-            avg_crossing_right = np.mean([i for i in intervals_right if trimmed_right[0] <= i <= trimmed_right[1]])
-            self.left_calib_frequency = 1 / avg_crossing_left if avg_crossing_left > 0 else 1.2
-            self.right_calib_frequency = 1 / avg_crossing_right if avg_crossing_right > 0 else 1.3
+            # Stride Frequency 계산 (최근 3개 간격 평균)
+            intervals_left = [t2 - t1 for (t1, _), (t2, _) in zip(list(self.crossings_left)[:-1], list(self.crossings_left)[1:])][-3:]
+            intervals_right = [t2 - t1 for (t1, _), (t2, _) in zip(list(self.crossings_right)[:-1], list(self.crossings_right)[1:])][-3:]
+            avg_crossing_left = np.mean(intervals_left) if intervals_left else 1.0
+            avg_crossing_right = np.mean(intervals_right) if intervals_right else 1.0
+            self.left_calib_frequency = min(1.0 / avg_crossing_left if avg_crossing_left > 0 else 1.2, 2.0)  # 상한 2.0 Hz
+            self.right_calib_frequency = min(1.0 / avg_crossing_right if avg_crossing_right > 0 else 1.3, 2.0)  # 상한 2.0 Hz
 
-            # 높이 이동값 계산
-            left_y = np.array(list(self.left_heel_heights)[-240:])
-            right_y = np.array(list(self.right_heel_heights)[-240:])
-            self.left_height_movement = np.mean(np.abs(np.diff(left_y)))
-            self.right_height_movement = np.mean(np.abs(np.diff(right_y)))
-            print(f"Debug: left_y range={np.max(left_y):.2f} - {np.min(left_y):.2f}, height_movement={self.left_height_movement:.4f}")
-            print(f"Debug: right_y range={np.max(right_y):.2f} - {np.min(right_y):.2f}, height_movement={self.right_height_movement:.4f}")
+            # Height Movement는 실시간 값 유지 (마지막 교차 구간 값)
+            if self.left_height_movement == 0.0:
+                self.left_height_movement = 0.10
+            if self.right_height_movement == 0.0:
+                self.right_height_movement = 0.12
 
-            # 가속도 계수 계산 (독립적으로)
-            target_speed = 1.399  # 목표 속도
-            left_calib_speed = self.left_height_movement * self.left_calib_frequency
-            right_calib_speed = self.right_height_movement * self.right_calib_frequency
-            self.accel_factor_left = target_speed / left_calib_speed if left_calib_speed > 0 else 1.0
-            self.accel_factor_right = target_speed / right_calib_speed if right_calib_speed > 0 else 1.0
-
-            # 노이즈 스코어 계산 (기존 유지)
+            # 노이즈 스코어 계산 (기존 로직 유지)
             left_x = np.array([pos[0] for pos in self.left_heel_40frame])
             left_y = np.array([pos[1] for pos in self.left_heel_40frame])
             left_z = np.array([pos[2] for pos in self.left_heel_40frame])
@@ -240,20 +253,18 @@ class Calibration1Window(CalibrationBase):
             score_right = 1 * delta_x_right + 1 * delta_y_right + 1 * delta_z_right
             self.base_noise_score = (score_left + score_right) / 2
 
-            # 결과 출력
+            # Accel Factor 제거, 결과 출력
             print(f"Calibration Done: Left Threshold: {self.left_crossing_threshold:.2f}, Right Threshold: {self.right_crossing_threshold:.2f}, "
-                  f"Accel Factor Left: {self.accel_factor_left:.2f}, Accel Factor Right: {self.accel_factor_right:.2f}, "
                   f"Base Noise Score: {self.base_noise_score:.2f}, "
-                  f"Left Height Movement: {self.left_height_movement:.2f}, Right Height Movement: {self.right_height_movement:.2f}")
-            print(f"Left Calibrated Stride Frequency: {self.left_calib_frequency:.2f} Hz, Right Calibrated Stride Frequency: {self.right_calib_frequency:.2f} Hz")
-            print(f"1.399 Mapping: Left = accel_factor_left ({self.accel_factor_left:.2f}) * left_height_movement ({self.left_height_movement:.4f}) * left_calib_frequency ({self.left_calib_frequency:.2f}) ≈ 1.399")
-            print(f"1.399 Mapping: Right = accel_factor_right ({self.accel_factor_right:.2f}) * right_height_movement ({self.right_height_movement:.4f}) * right_calib_frequency ({self.right_calib_frequency:.2f}) ≈ 1.399")
+                  f"Left Height Movement: {self.left_height_movement:.2f}, Right Height Movement: {self.right_height_movement:.2f}, "
+                  f"Left Calib Frequency: {self.left_calib_frequency:.2f} Hz, Right Calib Frequency: {self.right_calib_frequency:.2f} Hz")
 
         self.root.destroy()
 
     def get_results(self):
-        return (self.left_crossing_threshold, self.right_crossing_threshold, self.accel_factor_left, self.accel_factor_right, self.base_noise_score, self.left_calib_frequency, self.right_calib_frequency)
-
+        # Accel Factor 제거, 필요한 값만 반환
+        return (self.left_crossing_threshold, self.right_crossing_threshold, self.base_noise_score, 
+                self.left_calib_frequency, self.right_calib_frequency, self.left_height_movement, self.right_height_movement)
     def display_image(self, img):
         imgtk = ImageTk.PhotoImage(image=Image.fromarray(img))
         self.canvas.itemconfig(self.canvas_video, image=imgtk)
@@ -330,8 +341,8 @@ class InferenceWindow(tk.Frame):
             mp_pose = mp.solutions.pose.PoseLandmark
             left_heel_vis = landmarks[mp_pose.LEFT_HEEL].visibility
             right_heel_vis = landmarks[mp_pose.RIGHT_HEEL].visibility
-            left_heel_visible = left_heel_vis >= 0.8
-            right_heel_visible = right_heel_vis >= 0.8
+            left_heel_visible = left_heel_vis >= 0.7
+            right_heel_visible = right_heel_vis >= 0.7
 
             pose3d = mediapipeTo3dpose(results.pose_world_landmarks.landmark)
             pose3d[:, 0], pose3d[:, 1] = -pose3d[:, 0], -pose3d[:, 1]
